@@ -29,7 +29,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "name": "",
     "email": "",
     "phone": "",
-    "location": "Jaipur, India",
+    "location": "India",
     "experience_years": 3,
     "credentials": {
         "linkedin": {"email": "", "password": ""},
@@ -47,7 +47,7 @@ class AppConfig:
     name: str = ""
     email: str = ""
     phone: str = ""
-    location: str = "Jaipur, India"
+    location: str = "India"
     experience_years: int = 3
     credentials: dict[str, dict[str, str]] = field(default_factory=dict)
     autofill: dict[str, Any] = field(default_factory=dict)
@@ -74,7 +74,7 @@ def load_config() -> AppConfig:
         name=raw.get("name", ""),
         email=raw.get("email", ""),
         phone=raw.get("phone", ""),
-        location=raw.get("location", "Jaipur, India"),
+        location=raw.get("location", "India"),
         experience_years=raw.get("experience_years", 3),
         credentials=raw.get("credentials", {}),
         autofill=raw.get("autofill", {}),

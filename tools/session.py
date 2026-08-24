@@ -13,9 +13,16 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, async_playwright
 
-from config import SESSIONS_DIR, ensure_dirs, get_user_agent
+from config import APP_DIR, SESSIONS_DIR, ensure_dirs, get_user_agent
 
 logger = logging.getLogger(__name__)
+
+# LinkedIn is driven through a persistent Firefox profile rather than saved
+# cookies (it ties its session to browser fingerprint/local storage, so a
+# cookie-only replay gets logged out). Search and apply both launch this
+# same profile directory, so the login has to happen inside it.
+BROWSER_PROFILES_DIR = APP_DIR / "browser-profiles"
+PERSISTENT_PROFILE_PLATFORMS = {"linkedin"}
 
 PLATFORM_LOGIN_URLS: dict[str, str] = {
     "linkedin": "https://www.linkedin.com/login",
@@ -33,6 +40,48 @@ SUPPORTED_PLATFORMS = tuple(PLATFORM_LOGIN_URLS.keys())
 
 def _cookie_path(platform: str) -> Path:
     return SESSIONS_DIR / f"{platform}.json"
+
+
+async def _interactive_login_persistent(platform: str, url: str) -> dict[str, Any]:
+    """
+    Log in inside the persistent browser profile that search/apply reuse.
+
+    Saving cookies would be useless here: the search and apply flows launch
+    this profile directory directly and never load the cookie jar, so the
+    login must be performed in the profile itself.
+    """
+    profile_dir = BROWSER_PROFILES_DIR / platform
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    async with async_playwright() as pw:
+        context = await pw.firefox.launch_persistent_context(
+            str(profile_dir), headless=False,
+            viewport={"width": 1280, "height": 800},
+            locale="en-IN", timezone_id="Asia/Kolkata",
+        )
+        try:
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            logger.info(
+                "Browser opened for %s. Log in (password or OTP) — the session "
+                "is stored in the profile itself. Waiting up to 2 minutes...",
+                platform,
+            )
+            await page.wait_for_timeout(120_000)
+            logged_in = "login" not in page.url and "checkpoint" not in page.url
+        finally:
+            await context.close()
+
+    return {
+        "success": True,
+        "platform": platform,
+        "storage": f"persistent browser profile: {profile_dir}",
+        "looks_logged_in": logged_in,
+        "note": (
+            "If looks_logged_in is false, re-run and complete the login "
+            "before the window closes."
+        ),
+    }
 
 
 def has_session(platform: str) -> bool:
@@ -84,6 +133,9 @@ async def interactive_login(platform: str) -> dict[str, Any]:
 
     url = PLATFORM_LOGIN_URLS[platform]
     ensure_dirs()
+
+    if platform in PERSISTENT_PROFILE_PLATFORMS:
+        return await _interactive_login_persistent(platform, url)
 
     async with async_playwright() as pw:
         # Use Firefox — Chromium gets TLS-fingerprint blocked by many job sites

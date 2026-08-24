@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import urllib.parse
 from dataclasses import asdict, dataclass, field
@@ -20,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import APP_DIR, get_user_agent, load_config
-from tools.profile import PROFILE, compute_match_score, should_exclude
+from tools.profile import PROFILE, compute_match_score, should_exclude, title_is_relevant
 from tools.session import load_cookies
 
 # Persistent browser profiles for platforms that need full auth (LinkedIn)
@@ -99,19 +100,23 @@ class JobResult:
 # Per-platform search URL builders
 # ---------------------------------------------------------------------------
 
-def _linkedin_url(keywords: str, location: str, experience: int) -> str:
+def _linkedin_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
+    # LinkedIn's f_TPR is a "past N seconds" window — use its own
+    # server-side recency filter (the same one the LinkedIn UI's "Past 24
+    # hours" pill sets) instead of filtering after the fact, which was
+    # unreliable given how few candidates our scraper otherwise sees.
     params = {
         "keywords": keywords,
         "location": location,
         "f_E": "3,4",           # associate + mid-senior
         "f_AL": "true",         # Easy Apply only
         "sortBy": "DD",         # most recent
-        "f_TPR": "r2592000",    # past 30 days
+        "f_TPR": f"r{max(days, 1) * 86400}",
     }
     return "https://www.linkedin.com/jobs/search/?" + urllib.parse.urlencode(params)
 
 
-def _naukri_url(keywords: str, location: str, experience: int) -> str:
+def _naukri_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
     kw_slug = keywords.lower().replace(" ", "-").replace(",", "-")
     loc_slug = location.lower().replace(" ", "-").replace(",", "")
     # Use experience range: e.g. 3 years → search 3-5 year range
@@ -124,32 +129,32 @@ def _naukri_url(keywords: str, location: str, experience: int) -> str:
     )
 
 
-def _wellfound_url(keywords: str, location: str, experience: int) -> str:
+def _wellfound_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
     params = {"q": keywords, "location": location}
     return "https://wellfound.com/jobs?" + urllib.parse.urlencode(params)
 
 
-def _indeed_url(keywords: str, location: str, experience: int) -> str:
-    params = {"q": keywords, "l": location, "fromage": "14"}
+def _indeed_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
+    params = {"q": keywords, "l": location, "fromage": str(min(days, 14))}
     return "https://in.indeed.com/jobs?" + urllib.parse.urlencode(params)
 
 
-def _hirist_url(keywords: str, location: str, experience: int) -> str:
+def _hirist_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
     params = {"q": keywords, "loc": location, "exp": str(experience)}
     return "https://www.hirist.tech/jobs?" + urllib.parse.urlencode(params)
 
 
-def _glassdoor_url(keywords: str, location: str, experience: int) -> str:
+def _glassdoor_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
     params = {"q": keywords, "l": location}
     return "https://www.glassdoor.co.in/Job/jobs.htm?" + urllib.parse.urlencode(params)
 
 
-def _instahyre_url(keywords: str, location: str, experience: int) -> str:
+def _instahyre_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
     params = {"q": keywords, "location": location, "experience": str(experience)}
     return "https://www.instahyre.com/search-jobs/?" + urllib.parse.urlencode(params)
 
 
-def _cutshort_url(keywords: str, location: str, experience: int) -> str:
+def _cutshort_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
     params = {"q": keywords, "location": location, "experience": f"{experience}-{experience + 2}"}
     return "https://cutshort.io/jobs?" + urllib.parse.urlencode(params)
 
@@ -183,7 +188,40 @@ async def _detect_captcha(page: Page) -> bool:
     return any(f" {ind}" in f" {text}" or text.startswith(ind) for ind in indicators)
 
 
-async def _scrape_linkedin(page: Page, url: str) -> list[JobResult]:
+# Cap how many LinkedIn listings get a full-JD fetch per search — each one
+# is a real page navigation, so keep this conservative to limit run time
+# and stay under LinkedIn's automation-detection radar.
+LINKEDIN_JD_FETCH_LIMIT = 15
+
+
+async def _fetch_linkedin_description(page: Page, url: str) -> str:
+    """
+    Visit a single LinkedIn job posting and extract the full JD text.
+
+    LinkedIn renders the description under build-hashed CSS classes that
+    change often, so class selectors are unreliable. Instead, locate the
+    "About the job" marker in the page's plain text and slice from there —
+    that heading is stable even when the surrounding markup isn't.
+    """
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        await page.wait_for_timeout(2500)
+        desc = await page.evaluate("""() => {
+            const text = document.body.innerText || '';
+            const markers = ['About the job', 'Job description', 'About this job'];
+            for (const m of markers) {
+                const idx = text.indexOf(m);
+                if (idx !== -1) return text.slice(idx, idx + 4000).trim();
+            }
+            return '';
+        }""")
+        return desc or ""
+    except Exception as exc:
+        logger.warning("LinkedIn JD fetch failed for %s: %s", url, exc)
+        return ""
+
+
+async def _scrape_linkedin(page: Page, url: str, fetch_jd: bool = True) -> list[JobResult]:
     """
     Scrape LinkedIn jobs search — uses persistent browser profile for auth.
     URL already has f_AL=true (Easy Apply filter).
@@ -209,15 +247,14 @@ async def _scrape_linkedin(page: Page, url: str) -> list[JobResult]:
                 match_score=0, platform="linkedin",
             )]
 
-        # Scroll to load more jobs
-        for _ in range(3):
-            await page.evaluate("window.scrollBy(0, 800)")
-            await page.wait_for_timeout(1000)
-
-        # Extract job data via JS — works for both authenticated and public views
-        jobs_data = await page.evaluate('''() => {
+        # LinkedIn's job list renders inside its own internally-scrollable
+        # panel (build-hashed class name, not stable) rather than the page
+        # body, AND virtualizes it — off-screen cards get swapped out of the
+        # DOM as you scroll rather than accumulating. So extraction has to
+        # happen on every scroll step (accumulating by URL), not once at the
+        # end, or everything except the final viewport's worth is lost.
+        extract_js = '''() => {
             const jobs = [];
-            // Authenticated view cards
             const cards = document.querySelectorAll(
                 'li.jobs-search-results__list-item, ' +
                 'div.job-card-container, ' +
@@ -229,15 +266,18 @@ async def _scrape_linkedin(page: Page, url: str) -> list[JobResult]:
                 if (!linkEl) continue;
 
                 const titleEl = card.querySelector(
-                    'h3, a.job-card-list__title, a.job-card-container__link span, ' +
-                    'h3.base-search-card__title'
+                    'a.job-card-container__link, a.job-card-list__title--link, ' +
+                    'h3, a.job-card-list__title, h3.base-search-card__title'
                 );
                 const companyEl = card.querySelector(
+                    'div.artdeco-entity-lockup__subtitle, ' +
                     'h4, h4.base-search-card__subtitle, ' +
                     'a[data-tracking-control-name*="company"], ' +
                     'span.job-card-container__primary-description'
                 );
                 const locationEl = card.querySelector(
+                    'div.artdeco-entity-lockup__caption li, ' +
+                    'div.artdeco-entity-lockup__caption span, ' +
                     'span.job-search-card__location, ' +
                     'li.job-card-container__metadata-item, ' +
                     'span[class*="location"], span.job-card-container__metadata-wrapper'
@@ -255,12 +295,45 @@ async def _scrape_linkedin(page: Page, url: str) -> list[JobResult]:
                 }
             }
             return jobs;
-        }''')
+        }'''
 
-        logger.info("LinkedIn: extracted %d jobs via JS", len(jobs_data))
+        accumulated: dict[str, dict] = {}
+        stale_rounds = 0
+        for _ in range(12):
+            batch = await page.evaluate(extract_js)
+            added = 0
+            for job in batch:
+                href = job.get("href", "")
+                if href and href not in accumulated:
+                    accumulated[href] = job
+                    added += 1
+
+            if len(accumulated) >= 40 or stale_rounds >= 2:
+                break
+            stale_rounds = stale_rounds + 1 if added == 0 else 0
+
+            scrolled = await page.evaluate("""() => {
+                const card = document.querySelector('div.job-card-container');
+                if (!card) return false;
+                let el = card;
+                while (el && el !== document.body) {
+                    if (el.scrollHeight > el.clientHeight + 10) {
+                        el.scrollTop = el.scrollHeight;
+                        return true;
+                    }
+                    el = el.parentElement;
+                }
+                return false;
+            }""")
+            if not scrolled:
+                break
+            await page.wait_for_timeout(1800)
+
+        jobs_data = list(accumulated.values())
+        logger.info("LinkedIn: extracted %d unique jobs via JS", len(jobs_data))
 
         seen_urls = set()
-        for job in jobs_data[:25]:
+        for job in jobs_data[:40]:
             href = job.get("href", "")
             if href and not href.startswith("http"):
                 href = "https://www.linkedin.com" + href
@@ -280,6 +353,8 @@ async def _scrape_linkedin(page: Page, url: str) -> list[JobResult]:
             if days_ago > 30:
                 continue
 
+            # Provisional score from title/location only — refined below
+            # once the full JD text has been fetched for the best candidates.
             score = compute_match_score(title, "", location)
             results.append(JobResult(
                 title=title, company=company, location=location,
@@ -287,6 +362,22 @@ async def _scrape_linkedin(page: Page, url: str) -> list[JobResult]:
                 match_score=score, platform="linkedin",
                 posted_days_ago=days_ago,
             ))
+
+        # Optionally fetch the full JD for the strongest title/location
+        # candidates and re-score against it, so relevancy reflects actual
+        # job content rather than just the title. Each fetch is a real page
+        # navigation (~4s), so this dominates search runtime — skip it via
+        # fetch_jd=False when the title gate alone is filter enough and
+        # speed matters more than score precision.
+        results.sort(key=lambda j: j.match_score, reverse=True)
+        if fetch_jd:
+            for job in results[:LINKEDIN_JD_FETCH_LIMIT]:
+                description = await _fetch_linkedin_description(page, job.apply_url)
+                if description:
+                    job.description = description
+                    job.match_score = compute_match_score(job.title, description, job.location)
+                await page.wait_for_timeout(random.uniform(1000, 2000))
+            results.sort(key=lambda j: j.match_score, reverse=True)
     except Exception as exc:
         logger.error("LinkedIn scrape error: %s", exc)
     return results
@@ -799,6 +890,54 @@ async def _scrape_cutshort(page: Page, url: str) -> list[JobResult]:
     return results
 
 
+async def search_linkedin_keywords(
+    keywords: list[str],
+    location: str = "India",
+    experience_years: int = 4,
+    days: int = 30,
+    fetch_jd: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    Run one LinkedIn search per keyword inside a SINGLE browser session.
+
+    Calling search_jobs() once per keyword launches a new persistent context
+    on the same profile directory each time; if the previous one hasn't
+    released its lock yet the next launch blocks until timeout. Reusing one
+    context avoids that entirely and is much faster. Results are deduped by
+    URL with LinkedIn's tracking query string stripped.
+    """
+    profile_dir = str(BROWSER_PROFILES_DIR / "linkedin")
+    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
+    merged: dict[str, JobResult] = {}
+    async with async_playwright() as pw:
+        ctx = await pw.firefox.launch_persistent_context(
+            profile_dir, headless=False, viewport={"width": 1280, "height": 800},
+        )
+        try:
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            for kw in keywords:
+                url = _linkedin_url(kw, location, experience_years, days)
+                try:
+                    results = await _scrape_linkedin(page, url, fetch_jd)
+                except Exception as exc:
+                    logger.error("LinkedIn search failed for %r: %s", kw, exc)
+                    continue
+                added = 0
+                for job in results:
+                    clean = job.apply_url.split("?")[0]
+                    if clean and clean not in merged:
+                        job.apply_url = clean
+                        merged[clean] = job
+                        added += 1
+                logger.info("LinkedIn %r: %d results, +%d new (total %d)", kw, len(results), added, len(merged))
+        finally:
+            await ctx.close()
+
+    jobs = sorted(merged.values(), key=lambda j: j.match_score, reverse=True)
+    return [j.to_dict() for j in jobs]
+
+
 PLATFORM_SCRAPERS = {
     "linkedin": _scrape_linkedin,
     "naukri": _scrape_naukri,
@@ -820,10 +959,15 @@ async def search_jobs(
     experience_years: int = 3,
     remote: bool = False,
     platforms: list[str] | None = None,
+    days: int = 30,
+    fetch_jd: bool = True,
 ) -> list[dict[str, Any]]:
     """
     Search job platforms concurrently and return merged results.
     If *platforms* is given, only search those (e.g. ["naukri"]).
+    *days* is passed to each platform's own recency filter where supported
+    (e.g. LinkedIn's "Past N hours/days" search filter) rather than only
+    filtering client-side after scraping.
     """
     if not keywords:
         keywords = list(PROFILE.default_search_keywords)
@@ -856,8 +1000,8 @@ async def search_jobs(
                     viewport={"width": 1280, "height": 800},
                 )
                 li_page = li_ctx.pages[0] if li_ctx.pages else await li_ctx.new_page()
-                li_url = PLATFORM_BUILDERS["linkedin"](kw_string, location, experience_years)
-                li_results = await _scrape_linkedin(li_page, li_url)
+                li_url = PLATFORM_BUILDERS["linkedin"](kw_string, location, experience_years, days)
+                li_results = await _scrape_linkedin(li_page, li_url, fetch_jd)
                 platform_results.append(li_results)
                 await li_ctx.close()
             except Exception as exc:
@@ -882,7 +1026,7 @@ async def search_jobs(
             # Build URLs
             urls: dict[str, str] = {}
             for platform in other_platforms:
-                urls[platform] = PLATFORM_BUILDERS[platform](kw_string, location, experience_years)
+                urls[platform] = PLATFORM_BUILDERS[platform](kw_string, location, experience_years, days)
 
             # Scrape concurrently — one page per platform
             async def _run(platform: str) -> list[JobResult]:
@@ -924,11 +1068,19 @@ def filter_jobs(
     - Excludes jobs posted more than max_days_old days ago
     - Returns top 20
     """
+    avoid_companies = [c.strip().lower() for c in load_config().autofill.get("avoid_companies", []) if c.strip()]
+
     filtered: list[dict[str, Any]] = []
     for job in jobs:
+        if not title_is_relevant(job.get("title", "")):
+            continue
         if job.get("match_score", 0) < min_match_score:
             continue
         if should_exclude(job.get("title", ""), job.get("description", "")):
+            continue
+        # Never apply to the candidate's current/previous employers
+        company = job.get("company", "").strip().lower()
+        if company and any(ac in company or company in ac for ac in avoid_companies):
             continue
         # Skip jobs older than max_days_old (allow -1 = unknown through)
         days = job.get("posted_days_ago", -1)

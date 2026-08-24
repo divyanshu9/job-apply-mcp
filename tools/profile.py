@@ -33,10 +33,12 @@ class CandidateProfile:
     skills: tuple[str, ...] = (
         "GCP",
         "Azure",
+        "AWS",
         "Terraform",
         "Kubernetes",
         "Docker",
         "GitLab CI/CD",
+        "GitHub Actions",
         "Jenkins",
         "Azure DevOps",
         "Prometheus",
@@ -56,10 +58,13 @@ class CandidateProfile:
         "NLP",
         "Generative AI",
         "SonarQube",
+        "Snyk",
         "Trivy",
         "SBOM",
         "Cloud SQL",
         "BigQuery",
+        "MySQL",
+        "Firestore",
         "Secret Manager",
         "IAM",
         "AKS",
@@ -85,6 +90,19 @@ class CandidateProfile:
         "GenAI Infrastructure Engineer",
         "Site Reliability Engineer",
     )
+    # Hard title gate: a job's title must contain at least one of these
+    # substrings to be considered at all, regardless of skill-overlap score.
+    # This stops loosely-related roles (Data Engineer, Backend Developer,
+    # IT helpdesk "Systems Engineer") from slipping through on fuzzy score
+    # alone just because their descriptions mention overlapping tools.
+    title_must_contain: tuple[str, ...] = (
+        "devops",
+        "sre",
+        "site reliability",
+        "cloud engineer",
+        "systems engineer",
+        "platform engineer",
+    )
     avoid_keywords: tuple[str, ...] = (
         "frontend",
         "react developer",
@@ -99,6 +117,16 @@ class CandidateProfile:
         "pytorch training",
         "tensorflow training",
         "deep learning researcher",
+        "end-user support",
+        "end user support",
+        "helpdesk",
+        "help desk",
+        "desktop support",
+        "service desk",
+        "geographic information system",
+        "noc technician",
+        "l1 support",
+        "l2 support",
     )
 
 
@@ -202,3 +230,13 @@ def should_exclude(
         if _normalize(kw) in combined:
             return True
     return False
+
+
+def title_is_relevant(job_title: str, profile: CandidateProfile = PROFILE) -> bool:
+    """
+    Hard gate: the job title must contain at least one of the candidate's
+    target-role substrings. Applied before scoring so loosely-related roles
+    can't pass just by scoring well on skill overlap.
+    """
+    norm = _normalize(job_title)
+    return any(kw in norm for kw in profile.title_must_contain)

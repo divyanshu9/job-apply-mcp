@@ -97,6 +97,25 @@ TOOLS: list[Tool] = [
                         "Example: [\"naukri\", \"linkedin\"]"
                     ),
                 },
+                "days": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": (
+                        "Only return jobs posted within this many days. On "
+                        "LinkedIn this uses its own server-side recency "
+                        "filter, so days=1 means 'past 24 hours'."
+                    ),
+                },
+                "fetch_jd": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "LinkedIn only. If true, opens each top candidate to "
+                        "read the full job description and re-score against "
+                        "it — more accurate but adds minutes per search. Set "
+                        "false for a fast run that relies on the title gate."
+                    ),
+                },
             },
             "additionalProperties": False,
         },
@@ -180,6 +199,25 @@ TOOLS: list[Tool] = [
                     "default": True,
                     "description": "Preview mode — no real applications.",
                 },
+                "max_per_company": {
+                    "type": "integer",
+                    "default": 2,
+                    "description": (
+                        "Cap applications to any one company (default 2). "
+                        "Counts applications already recorded in the last "
+                        "company_window_days, so the cap holds across "
+                        "consecutive batches instead of resetting each run."
+                    ),
+                },
+                "company_window_days": {
+                    "type": "integer",
+                    "default": 1,
+                    "description": (
+                        "Look-back window for the per-company cap. Default 1 "
+                        "day = 'per session'. Raise it to spread applications "
+                        "to the same employer over a longer period."
+                    ),
+                },
             },
             "required": ["jobs"],
             "additionalProperties": False,
@@ -247,6 +285,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 experience_years=arguments.get("experience_years", 3),
                 remote=arguments.get("remote", False),
                 platforms=arguments.get("platforms"),
+                days=arguments.get("days", 30),
+                fetch_jd=arguments.get("fetch_jd", True),
             )
             return [TextContent(
                 type="text",
@@ -282,6 +322,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 jobs=arguments["jobs"],
                 max_applications=arguments.get("max_applications", 10),
                 dry_run=arguments.get("dry_run", True),
+                max_per_company=arguments.get("max_per_company", 2),
+                company_window_days=arguments.get("company_window_days", 1),
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

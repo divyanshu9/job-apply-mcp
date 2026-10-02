@@ -230,6 +230,7 @@ class AppConfig:
     phone: str = ""
     location: str = "India"
     experience_years: int = 7
+    platforms: list[str] = field(default_factory=list)
     credentials: dict[str, dict[str, str]] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
 

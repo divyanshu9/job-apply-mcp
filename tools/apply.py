@@ -1629,6 +1629,49 @@ async def _apply_cutshort(page: Page, cfg: AppConfig, cover_note: str) -> dict[s
         return {"success": False, "error": str(exc)}
 
 
+async def _apply_foundit(page: Page, cfg: AppConfig, cover_note: str) -> dict[str, Any]:
+    """Apply on foundit using the public quick/easy-apply flow when available."""
+    try:
+        apply_btn = await page.query_selector(
+            "button:has-text('Apply Now'), button:has-text('Quick Apply'), "
+            "button:has-text('Apply'), a:has-text('Apply Now'), "
+            "a:has-text('Quick Apply'), a:has-text('Apply')"
+        )
+        if not apply_btn:
+            return {"success": False, "error": "Apply button not found on foundit"}
+
+        await apply_btn.click()
+        await page.wait_for_timeout(2500)
+
+        filled = await _autofill_fields(page, cfg)
+        if cfg.resume_exists:
+            await _upload_resume(page, cfg.resume_path)
+
+        for _ in range(5):
+            text = (await page.inner_text("body")).lower()
+            if "application submitted" in text or "successfully applied" in text or "application received" in text:
+                return {"success": True, "confirmation": "foundit application submitted"}
+
+            await _autofill_fields(page, cfg)
+            if cfg.resume_exists:
+                await _upload_resume(page, cfg.resume_path)
+
+            submit = await page.query_selector(
+                "button:has-text('Submit'), button:has-text('Next'), "
+                "button:has-text('Continue'), button:has-text('Apply'), "
+                "button[type='submit']"
+            )
+            if submit and await submit.is_visible():
+                await submit.click()
+                await page.wait_for_timeout(2500)
+            else:
+                break
+
+        return {"success": True, "confirmation": f"foundit apply flow completed (autofilled {filled} fields)"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 PLATFORM_APPLYERS = {
     "linkedin": _apply_linkedin,
     "naukri": _apply_naukri,
@@ -1638,6 +1681,7 @@ PLATFORM_APPLYERS = {
     "glassdoor": _apply_glassdoor,
     "instahyre": _apply_instahyre,
     "cutshort": _apply_cutshort,
+    "foundit": _apply_foundit,
 }
 
 

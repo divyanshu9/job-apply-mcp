@@ -238,7 +238,7 @@ class AppConfig:
 
     @property
     def resume_path(self) -> str:
-        return str(self.profile.get("resume_path", ""))
+        return self.resolved_resume_path()
 
     @property
     def autofill(self) -> dict[str, Any]:

@@ -159,6 +159,11 @@ def _cutshort_url(keywords: str, location: str, experience: int, days: int = 30)
     return "https://cutshort.io/jobs?" + urllib.parse.urlencode(params)
 
 
+def _foundit_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", keywords.lower()).strip("-")
+    return f"https://www.foundit.in/search/{slug}-jobs"
+
+
 PLATFORM_BUILDERS: dict[str, Any] = {
     "linkedin": _linkedin_url,
     "naukri": _naukri_url,

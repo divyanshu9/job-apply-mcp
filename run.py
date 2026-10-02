@@ -34,10 +34,13 @@ def show_menu():
 
 
 def get_platforms():
-    print(f"\n  Available: {', '.join(SUPPORTED_PLATFORMS)}")
-    raw = input("  Platforms (comma-separated, or 'naukri'): ").strip()
+    cfg = load_config()
+    configured = cfg.platforms or list(SUPPORTED_PLATFORMS)
+    print(f"\n  Configured: {', '.join(configured)}")
+    print(f"  Available: {', '.join(SUPPORTED_PLATFORMS)}")
+    raw = input("  Platforms (comma-separated, or Enter for configured): ").strip()
     if not raw:
-        return ["naukri"]
+        return configured
     return [p.strip().lower() for p in raw.split(",")]
 
 

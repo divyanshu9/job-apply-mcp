@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from tools.session import interactive_login, SUPPORTED_PLATFORMS
+from config import load_config
 from tools.search import search_jobs, filter_jobs
 from tools.apply import bulk_apply
 from tools.tracker import get_application_summary
@@ -41,14 +42,13 @@ def get_platforms():
 
 
 def get_keywords():
-    print("\n  Default keywords: DevOps, MLOps, Cloud, SRE, Platform, K8s, CI/CD, GenAI, LLMOps")
+    cfg = load_config()
+    defaults = list(cfg.profile.get("default_search_keywords", []))
+    print(f"\n  Active profile: {cfg.active_profile}")
+    print(f"  Default keywords: {', '.join(defaults)}")
     raw = input("  Custom keywords (or press Enter for defaults): ").strip()
     if not raw:
-        return [
-            "DevOps Engineer", "MLOps Engineer", "Cloud Engineer",
-            "SRE Engineer", "Platform Engineer", "Kubernetes Engineer",
-            "CI CD Engineer", "GenAI Engineer", "LLMOps Engineer",
-        ]
+        return defaults
     return [k.strip() for k in raw.split(",")]
 
 
@@ -78,7 +78,7 @@ async def do_search_and_apply():
     for kw in keywords:
         jobs = await search_jobs(
             keywords=[kw], location="India",
-            experience_years=3, platforms=platforms,
+            experience_years=load_config().experience_years, platforms=platforms,
         )
         for j in jobs:
             if j["apply_url"] not in seen:

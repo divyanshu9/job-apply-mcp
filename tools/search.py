@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import APP_DIR, get_user_agent, load_config
-from tools.profile import PROFILE, compute_match_score, should_exclude, title_is_relevant
+from tools.profile import compute_match_score, should_exclude, title_is_relevant, get_active_profile
 from tools.session import load_cookies
 
 # Persistent browser profiles for platforms that need full auth (LinkedIn)
@@ -168,6 +168,7 @@ PLATFORM_BUILDERS: dict[str, Any] = {
     "glassdoor": _glassdoor_url,
     "instahyre": _instahyre_url,
     "cutshort": _cutshort_url,
+    "foundit": _foundit_url,
 }
 
 # ---------------------------------------------------------------------------
@@ -890,6 +891,92 @@ async def _scrape_cutshort(page: Page, url: str) -> list[JobResult]:
     return results
 
 
+def _foundit_url(keywords: str, location: str, experience: int, days: int = 30) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", keywords.lower()).strip("-")
+    return f"https://www.foundit.in/search/{slug}-jobs"
+
+
+async def _scrape_foundit(page: Page, url: str) -> list[JobResult]:
+    """Scrape public foundit job-search results."""
+    results: list[JobResult] = []
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        await page.wait_for_timeout(3000)
+        if await _detect_captcha(page):
+            return [JobResult(
+                title="[CAPTCHA] foundit requires manual verification",
+                company="", location="", salary="", apply_url=url,
+                match_score=0, platform="foundit",
+            )]
+
+        cards = await page.query_selector_all(
+            "div[class*='job-card'], li[class*='job-card'], "
+            "div[class*='jobCard'], article[class*='job'], "
+            "div[class*='job-listing'], li[class*='job-listing']"
+        )
+        if not cards:
+            cards = await page.query_selector_all(
+                "a[href*='/job/'], a[href*='/job-detail/'], "
+                "a[href*='/job-listing/']"
+            )
+
+        seen: set[str] = set()
+        for card in cards[:50]:
+            title_el = await card.query_selector(
+                "h2 a, h3 a, h4 a, a[class*='title'], "
+                "a[class*='job-title'], a[href*='/job/'], "
+                "a[href*='/job-detail/'], a[href*='/job-listing/']"
+            )
+            if not title_el:
+                try:
+                    if await card.evaluate("(el) => el.tagName.toLowerCase()") == "a":
+                        title_el = card
+                except Exception:
+                    pass
+            title = (await title_el.inner_text()).strip() if title_el else ""
+            if not title or len(title) < 3:
+                continue
+
+            href = await title_el.get_attribute("href") if title_el else ""
+            if href and not href.startswith("http"):
+                href = "https://www.foundit.in" + href
+            clean_url = (href or url).split("?")[0]
+            if clean_url in seen:
+                continue
+            seen.add(clean_url)
+
+            company_el = await card.query_selector(
+                "span[class*='company'], div[class*='company'], "
+                "a[class*='company'], p[class*='company']"
+            )
+            location_el = await card.query_selector(
+                "span[class*='location'], div[class*='location'], "
+                "span[class*='city'], div[class*='city']"
+            )
+            salary_el = await card.query_selector(
+                "span[class*='salary'], div[class*='salary'], "
+                "span[class*='ctc'], div[class*='ctc']"
+            )
+            skills_el = await card.query_selector(
+                "div[class*='skill'], span[class*='skill'], "
+                "div[class*='tag'], span[class*='tag']"
+            )
+            company = (await company_el.inner_text()).strip() if company_el else ""
+            location = (await location_el.inner_text()).strip() if location_el else "India"
+            salary = (await salary_el.inner_text()).strip() if salary_el else "Not listed"
+            skills = (await skills_el.inner_text()).strip() if skills_el else ""
+
+            results.append(JobResult(
+                title=title, company=company, location=location,
+                salary=salary, apply_url=clean_url,
+                match_score=compute_match_score(title, skills, location),
+                platform="foundit",
+            ))
+    except Exception as exc:
+        logger.error("foundit scrape error: %s", exc)
+    return results
+
+
 async def search_linkedin_keywords(
     keywords: list[str],
     location: str = "India",
@@ -947,6 +1034,7 @@ PLATFORM_SCRAPERS = {
     "glassdoor": _scrape_glassdoor,
     "instahyre": _scrape_instahyre,
     "cutshort": _scrape_cutshort,
+    "foundit": _scrape_foundit,
 }
 
 # ---------------------------------------------------------------------------
@@ -970,7 +1058,7 @@ async def search_jobs(
     filtering client-side after scraping.
     """
     if not keywords:
-        keywords = list(PROFILE.default_search_keywords)
+        keywords = list(get_active_profile().default_search_keywords)
 
     kw_string = ", ".join(keywords)
     if remote:

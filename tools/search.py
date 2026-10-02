@@ -1070,10 +1070,11 @@ async def search_jobs(
         kw_string += " remote"
 
     # Determine which platforms to search
+    configured_platforms = load_config().platforms
     active_platforms = (
         [p for p in platforms if p in PLATFORM_SCRAPERS]
         if platforms
-        else list(PLATFORM_SCRAPERS.keys())
+        else [p for p in configured_platforms if p in PLATFORM_SCRAPERS]
     )
 
     # Separate LinkedIn (needs persistent profile) from other platforms

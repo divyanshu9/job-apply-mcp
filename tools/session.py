@@ -33,6 +33,7 @@ PLATFORM_LOGIN_URLS: dict[str, str] = {
     "glassdoor": "https://www.glassdoor.co.in/profile/login_input.htm",
     "instahyre": "https://www.instahyre.com/login/",
     "cutshort": "https://cutshort.io/login",
+    "foundit": "https://www.foundit.in/",
 }
 
 SUPPORTED_PLATFORMS = tuple(PLATFORM_LOGIN_URLS.keys())

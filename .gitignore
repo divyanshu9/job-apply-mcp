@@ -7,3 +7,6 @@ applications.db
 sessions/
 ~/.job-apply-mcp/
 .kiro/
+
+# Personal resumes — keep them local, never commit them
+resumes/*.pdf

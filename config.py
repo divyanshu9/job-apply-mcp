@@ -72,6 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "phone": "+91-7015973134",
     "location": "India",
     "experience_years": 7,
+    "platforms": ["indeed", "instahyre", "hirist", "cutshort", "foundit"],
     "credentials": {
         "indeed": {"email": "", "password": ""},
         "instahyre": {"email": "", "password": ""},
@@ -285,6 +286,7 @@ def load_config() -> AppConfig:
         phone=merged.get("phone", ""),
         location=merged.get("location", "India"),
         experience_years=merged.get("experience_years", 7),
+        platforms=merged.get("platforms", ["indeed", "instahyre", "hirist", "cutshort", "foundit"]),
         credentials=merged.get("credentials", {}),
         profiles=merged.get("profiles", {}),
     )
@@ -299,6 +301,7 @@ def save_config(config: AppConfig) -> None:
         "phone": config.phone,
         "location": config.location,
         "experience_years": config.experience_years,
+        "platforms": config.platforms,
         "credentials": config.credentials,
         "profiles": config.profiles,
     }

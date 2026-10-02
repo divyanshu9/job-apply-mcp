@@ -1,141 +1,45 @@
 """
-Candidate profile definition and job relevance matching logic.
+Candidate profiles and job relevance matching.
+
+The active profile is selected from ~/.job-apply-mcp/config.json and controls
+target roles, search keywords, skills, title gating and exclusion rules.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from difflib import SequenceMatcher
+from typing import Any
+
+from config import load_config
 
 
 @dataclass(frozen=True)
 class CandidateProfile:
-    """
-    Default candidate profile — DevOps / AI-ML Engineer template.
-    Users override these values via ~/.job-apply-mcp/config.json
-    """
-    title: str = "DevOps and AI/ML Engineer"
-    experience_years: int = 4
-    location: str = "India"
-    preferred_locations: tuple[str, ...] = (
-        "Remote",
-        "Bangalore",
-        "Bengaluru",
-        "Hyderabad",
-        "Pune",
-        "Delhi",
-        "Mumbai",
-        "Noida",
-        "Gurgaon",
-        "Gurugram",
-    )
-    skills: tuple[str, ...] = (
-        "GCP",
-        "Azure",
-        "AWS",
-        "Terraform",
-        "Kubernetes",
-        "Docker",
-        "GitLab CI/CD",
-        "GitHub Actions",
-        "Jenkins",
-        "Azure DevOps",
-        "Prometheus",
-        "Grafana",
-        "Python",
-        "Bash",
-        "PowerShell",
-        "Ollama",
-        "RAG",
-        "LangChain",
-        "QLoRA",
-        "LoRA",
-        "MCP Tools",
-        "FAISS",
-        "ChromaDB",
-        "LLMs",
-        "NLP",
-        "Generative AI",
-        "SonarQube",
-        "Snyk",
-        "Trivy",
-        "SBOM",
-        "Cloud SQL",
-        "BigQuery",
-        "MySQL",
-        "Firestore",
-        "Secret Manager",
-        "IAM",
-        "AKS",
-        "GKE",
-        "Fargate",
-    )
-    target_roles: tuple[str, ...] = (
-        "MLOps Engineer",
-        "LLMOps Engineer",
-        "Platform Engineer GenAI",
-        "DevOps Engineer",
-        "Site Reliability Engineer",
-        "AI Platform Engineer",
-        "Cloud DevOps Engineer",
-        "GenAI Infrastructure Engineer",
-    )
-    default_search_keywords: tuple[str, ...] = (
-        "DevOps Engineer",
-        "MLOps Engineer",
-        "LLMOps Engineer",
-        "Platform Engineer GenAI",
-        "Cloud DevOps AI",
-        "GenAI Infrastructure Engineer",
-        "Site Reliability Engineer",
-    )
-    # Hard title gate: a job's title must contain at least one of these
-    # substrings to be considered at all, regardless of skill-overlap score.
-    # This stops loosely-related roles (Data Engineer, Backend Developer,
-    # IT helpdesk "Systems Engineer") from slipping through on fuzzy score
-    # alone just because their descriptions mention overlapping tools.
-    title_must_contain: tuple[str, ...] = (
-        "devops",
-        "sre",
-        "site reliability",
-        "cloud engineer",
-        "systems engineer",
-        "platform engineer",
-    )
-    avoid_keywords: tuple[str, ...] = (
-        "frontend",
-        "react developer",
-        "angular developer",
-        "vue developer",
-        "android",
-        "ios",
-        "swift",
-        "kotlin",
-        "flutter",
-        "data scientist",
-        "pytorch training",
-        "tensorflow training",
-        "deep learning researcher",
-        "end-user support",
-        "end user support",
-        "helpdesk",
-        "help desk",
-        "desktop support",
-        "service desk",
-        "geographic information system",
-        "noc technician",
-        "l1 support",
-        "l2 support",
-    )
+    title: str
+    skills: tuple[str, ...]
+    target_roles: tuple[str, ...]
+    default_search_keywords: tuple[str, ...]
+    title_must_contain: tuple[str, ...]
+    avoid_keywords: tuple[str, ...]
 
 
-PROFILE = CandidateProfile()
+def get_active_profile() -> CandidateProfile:
+    cfg = load_config()
+    p = cfg.profile
+    return CandidateProfile(
+        title=cfg.active_profile,
+        skills=tuple(p.get("skills", [])),
+        target_roles=tuple(p.get("target_roles", [])),
+        default_search_keywords=tuple(p.get("default_search_keywords", [])),
+        title_must_contain=tuple(p.get("title_must_contain", [])),
+        avoid_keywords=tuple(p.get("avoid_keywords", [])),
+    )
 
 
 def _normalize(text: str) -> str:
-    """Lower-case, collapse whitespace, strip punctuation."""
-    return re.sub(r"[^a-z0-9 /+#]", " ", text.lower()).strip()
+    return re.sub(r"[^a-z0-9 /+#.-]", " ", text.lower()).strip()
 
 
 def _fuzzy_ratio(a: str, b: str) -> float:
@@ -153,68 +57,42 @@ def compute_match_score(
     job_description: str,
     job_location: str,
     required_skills: list[str] | None = None,
-    profile: CandidateProfile = PROFILE,
+    profile: CandidateProfile | None = None,
 ) -> float:
-    """
-    Return a 0.0-1.0 relevance score for a job against the candidate profile.
-
-    Scoring weights:
-        - Role match    : 35%
-        - Skill overlap : 40%
-        - Location match: 15%
-        - Avoid penalty : 10% (subtracted)
-    """
+    profile = profile or get_active_profile()
     norm_title = _normalize(job_title)
     norm_desc = _normalize(job_description)
     combined_text = f"{norm_title} {norm_desc}"
 
-    # --- Role match (35%) ---
     role_scores: list[float] = []
     for role in profile.target_roles:
         norm_role = _normalize(role)
-        # direct substring check
-        if norm_role in norm_title:
-            role_scores.append(1.0)
-        else:
-            role_scores.append(_fuzzy_ratio(norm_role, norm_title))
+        role_scores.append(1.0 if norm_role in norm_title else _fuzzy_ratio(norm_role, norm_title))
     role_score = max(role_scores) if role_scores else 0.0
 
-    # --- Skill overlap (40%) ---
     profile_skills_norm = {_normalize(s) for s in profile.skills}
     if required_skills:
         job_skills_norm = {_normalize(s) for s in required_skills}
         skill_score = _token_overlap(job_skills_norm, profile_skills_norm)
     else:
-        # fall back to checking how many profile skills appear in description
         matched = sum(1 for s in profile_skills_norm if s in combined_text)
         skill_score = min(matched / max(len(profile_skills_norm) * 0.3, 1), 1.0)
 
-    # --- Location match (15%) ---
+    # Any location is acceptable; location remains a relevance signal when a
+    # job is explicitly remote, in India, or in one of the common Indian hubs.
     norm_location = _normalize(job_location)
-    location_score = 0.0
-    if "remote" in norm_location:
-        location_score = 1.0
-    else:
-        for loc in profile.preferred_locations:
-            if _normalize(loc) in norm_location:
-                location_score = 1.0
-                break
-        if location_score == 0.0 and "india" in norm_location:
-            location_score = 1.0
+    location_score = 1.0 if (
+        "remote" in norm_location
+        or "india" in norm_location
+        or any(x in norm_location for x in (
+            "bangalore", "bengaluru", "hyderabad", "pune", "delhi",
+            "mumbai", "noida", "gurgaon", "gurugram", "chennai",
+        ))
+    ) else 0.5
 
-    # --- Avoid penalty (10%) ---
-    avoid_penalty = 0.0
-    for kw in profile.avoid_keywords:
-        if _normalize(kw) in combined_text:
-            avoid_penalty = 1.0
-            break
+    avoid_penalty = 1.0 if any(_normalize(kw) in combined_text for kw in profile.avoid_keywords) else 0.0
 
-    score = (
-        0.35 * role_score
-        + 0.40 * skill_score
-        + 0.15 * location_score
-        - 0.10 * avoid_penalty
-    )
+    score = 0.35 * role_score + 0.40 * skill_score + 0.15 * location_score - 0.10 * avoid_penalty
     return round(max(0.0, min(score, 1.0)), 3)
 
 
@@ -222,21 +100,14 @@ def should_exclude(
     job_title: str,
     job_description: str,
     required_skills: list[str] | None = None,
-    profile: CandidateProfile = PROFILE,
+    profile: CandidateProfile | None = None,
 ) -> bool:
-    """Return True if the job is in an excluded category."""
+    profile = profile or get_active_profile()
     combined = _normalize(f"{job_title} {job_description}")
-    for kw in profile.avoid_keywords:
-        if _normalize(kw) in combined:
-            return True
-    return False
+    return any(_normalize(kw) in combined for kw in profile.avoid_keywords)
 
 
-def title_is_relevant(job_title: str, profile: CandidateProfile = PROFILE) -> bool:
-    """
-    Hard gate: the job title must contain at least one of the candidate's
-    target-role substrings. Applied before scoring so loosely-related roles
-    can't pass just by scoring well on skill overlap.
-    """
+def title_is_relevant(job_title: str, profile: CandidateProfile | None = None) -> bool:
+    profile = profile or get_active_profile()
     norm = _normalize(job_title)
-    return any(kw in norm for kw in profile.title_must_contain)
+    return any(_normalize(kw) in norm for kw in profile.title_must_contain)
